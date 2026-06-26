@@ -14,7 +14,11 @@
 #include <unistd.h>
 #endif
 
+#ifdef USE_LIBUSB
+#include "hid_wrappers.h"
+#else
 #include <hidapi.h>
+#endif
 
 #define REPORT_SIZE 64
 #define USER_ROM_SIZE_SN32F260 30   // in KB
@@ -412,14 +416,19 @@ bool hid_get_feature(hid_device *dev, unsigned char *data, size_t data_size, uin
 
     uint8_t attempt_no = 1;
     while (attempt_no <= MAX_ATTEMPTS) {
-        clear_buffer(data, data_size);
+        // Allocate a safe local buffer with extra headroom to absorb the 65-byte read
+        unsigned char safe_buf[REPORT_SIZE + 4];
+        clear_buffer(safe_buf, sizeof(safe_buf));
 
-        // Attempt to get the feature report
-        int res = hid_get_feature_report(dev, data, data_size + 1);
+        // Attempt to get the feature report using our safe stack space
+        int res = hid_get_feature_report(dev, safe_buf, data_size + 1);
 
         if (res == (data_size + 1)) {
             // Shift the data buffer to remove the Report ID
-            memmove(data, data + 1, res - 1);
+            memmove(safe_buf, safe_buf + 1, res - 1);
+
+            // Copy ONLY the safe amount of bytes back to the user's actual data pointer
+            memcpy(data, safe_buf, data_size);
 
             if (debug) {
                 printf("\n");

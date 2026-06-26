@@ -21,8 +21,16 @@ endif
 #############  Mac
 ifeq "$(OS)" "macos"
 
-CFLAGS+=`pkg-config hidapi --cflags`
-LIBS=-lhidapi -framework IOKit -framework CoreFoundation -framework AppKit
+ifeq ($(USE_LIBUSB), 1)
+  LIBS=`pkg-config libusb-1.0 --libs`
+  CFLAGS+=`pkg-config libusb-1.0 --cflags` -DUSE_LIBUSB
+  OBJS=hid_wrappers.o
+else 
+  LIBS=`pkg-config hidapi --libs`
+  CFLAGS+=`pkg-config hidapi --cflags`
+endif
+
+LIBS+=-framework IOKit -framework CoreFoundation -framework AppKit
 EXE=
 
 endif
