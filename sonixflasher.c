@@ -129,6 +129,8 @@ static void print_usage(char *m_name) {
             "  --file -f        Binary of the firmware to flash (*.bin extension) \n"
             "  --jumploader -j  Define if we are flashing a jumploader \n"
             "  --reboot -r      Request bootloader reboot in OEM firmware (options: sonix, evision, hfd) \n"
+            "  --usage-page -u  Open the HID collection with this usage page (e.g. 0xFF13), not the\n"
+            "                   first one hid_open finds (hidapi builds; needed for -r on macOS)\n"
             "  --debug -d       Enable debug mode \n"
             "  --nooffset -k    Disable offset checks \n"
             "  --list-vidpid -l Display supported VID/PID pairs \n"
@@ -139,6 +141,8 @@ static void print_usage(char *m_name) {
             "   sonixflasher --vidpid 0c45/7040 --file fw.bin -j\n"
             ". Flash fw to device w/ vid/pid 0x0c45/0x7040 and offset 0x200\n"
             "   sonixflasher --vidpid 0c45/7040 --file fw.bin -o 0x200\n"
+            ". Reboot an HFD OEM firmware (AJAZZ AK820 Pro, 0c45/8009) through its 0xFF13 collection, then flash\n"
+            "   sonixflasher --vidpid 0c45/8009 -r hfd -u 0xFF13 --file fw.bin\n"
             "\n"
             ""
             "",
@@ -487,6 +491,34 @@ bool send_magic_command(hid_device *dev, const uint32_t *command) {
     if (attempt_no > MAX_ATTEMPTS) return false;
     clear_buffer(buf, sizeof(buf));
     return true;
+}
+
+/* Open the device. With a usage page, open the HID collection that carries it
+ * rather than whichever one hid_open lists first: an OEM firmware listens for
+ * the reboot magic on its vendor collection, and on macOS the first collection
+ * is usually the keyboard, which the system owns (with libusb, interface 0
+ * cannot even be claimed). On macOS hidapi matches the VID/PID through
+ * IOHIDManager and opens nothing else; on Windows hid_enumerate opens every
+ * HID device to read its attributes, so leave the option off there unless it
+ * is needed. Not available in the libusb build. */
+hid_device *open_device(uint16_t vid, uint16_t pid, long usage_page) {
+    if (usage_page < 0) return hid_open(vid, pid, NULL);
+#ifdef USE_LIBUSB
+    fprintf(stderr, "ERROR: --usage-page needs a hidapi build (not USE_LIBUSB).\n");
+    exit(1);
+#else
+    hid_device             *dev  = NULL;
+    struct hid_device_info *devs = hid_enumerate(vid, pid), *cur;
+    for (cur = devs; cur; cur = cur->next) {
+        if (cur->usage_page == (unsigned short)usage_page) {
+            if (debug) printf("Using %s (usage page 0x%04X, interface %d)\n", cur->path, cur->usage_page, cur->interface_number);
+            dev = hid_open_path(cur->path);
+            break;
+        }
+    }
+    hid_free_enumeration(devs);
+    return dev;
+#endif
 }
 
 bool reboot_to_bootloader(hid_device *dev, char *oem_option) {
@@ -897,6 +929,7 @@ int main(int argc, char *argv[]) {
     bool     reboot_requested = false;
     debug                     = false;
     bool no_offset_check      = false;
+    long usage_page           = -1;
 
     if (argc < 2) {
         print_usage(PROJECT_NAME);
@@ -913,10 +946,11 @@ int main(int argc, char *argv[]) {
                                  {"debug", no_argument, NULL, 'd'},
                                  {"nooffset", no_argument, NULL, 'k'},
                                  {"list-vidpid", no_argument, NULL, 'l'},
+                                 {"usage-page", required_argument, NULL, 'u'},
                                  {NULL, 0, 0, 0}};
     // clang-format on
 
-    while ((opt = getopt_long(argc, argv, "hlVv:o:r:f:jdk", longoptions, &opt_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hlVv:o:r:f:jdku:", longoptions, &opt_index)) != -1) {
         switch (opt) {
             case 'h': // Show help
                 print_usage(PROJECT_NAME);
@@ -967,6 +1001,13 @@ int main(int argc, char *argv[]) {
             case 'k': // skip offset check
                 no_offset_check = true;
                 break;
+            case 'u': // usage page of the collection to open
+                usage_page = strtol(optarg, &endptr, 0);
+                if (*endptr != '\0' || usage_page < 0 || usage_page > 0xFFFF) {
+                    fprintf(stderr, "ERROR: invalid usage page '%s'.\n", optarg);
+                    exit(1);
+                }
+                break;
             case '?':
             default:
                 switch (optopt) {
@@ -974,6 +1015,7 @@ int main(int argc, char *argv[]) {
                     case 'v':
                     case 'o':
                     case 'r':
+                    case 'u':
                         fprintf(stderr, "ERROR: option '-%c' requires a parameter.\n", optopt);
                         break;
                     case 0:
@@ -1004,14 +1046,14 @@ int main(int argc, char *argv[]) {
     printf("\n");
     printf("\n");
     printf("Opening device...\n");
-    handle = hid_open(vid, pid, NULL);
+    handle = open_device(vid, pid, usage_page);
 
     uint8_t attempt_no = 1;
     while (handle == NULL && attempt_no <= MAX_ATTEMPTS) // Try {MAX ATTEMPTS} to connect to device.
     {
         printf("Device failed to open, re-trying in 3 seconds. Attempt %d of %d...\n", attempt_no, MAX_ATTEMPTS);
         sleep(3);
-        handle = hid_open(vid, pid, NULL);
+        handle = open_device(vid, pid, usage_page);
         attempt_no++;
     }
 
